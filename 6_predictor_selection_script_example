@@ -1,0 +1,115 @@
+'''
+This is an example of the scripts needed to determine the best
+subset of predictors at each subset size. You'd need to change the inputs/outputs
+depending on perspective "P" (3 options), algorithms (5 options) "A" and impact
+category "IC" (3 options). In total 45 scripts as such need to be run.
+'''
+
+import pandas as pd
+import numpy as np
+import pickle
+import itertools
+from sklearn.ensemble import RandomForestRegressor, HistGradientBoostingRegressor
+from sklearn.linear_model import Ridge
+from sklearn.model_selection import cross_validate, KFold, GroupKFold
+from sklearn.neural_network import MLPRegressor
+from sklearn.neighbors import KNeighborsRegressor
+import optuna
+from sklearn.preprocessing import MinMaxScaler, PowerTransformer, PowerTransformer
+from sklearn.preprocessing import OrdinalEncoder
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import LeaveOneGroupOut
+np.random.seed(12)
+
+x_train = pd.read_pickle('x_P_wcat.pkl')
+y_train = pd.read_pickle('y_P_wcat.pkl')
+df_impacts = pd.read_pickle('df_impacts_P.pkl')
+df_categorical = pd.read_pickle('df_categorical_P.pkl')
+
+models = {'RF' : RandomForestRegressor(n_jobs = 1, random_state=12),
+            'KNN' : KNeighborsRegressor(n_jobs=1),
+            'ANN' : MLPRegressor(random_state=12, max_iter=10000),
+            'GBM' : HistGradientBoostingRegressor(random_state = 12), 
+            'GLM' : Ridge() }
+            
+best_estimators = {key: {model:{} for model in models.keys()} for key in df_impacts.columns}
+estimators = models.keys()
+groups = df_categorical.loc[x_train.index][['crop']]
+enc = OrdinalEncoder()
+groups_encoded = enc.fit_transform(groups)
+cv = GroupKFold(n_splits = 5, shuffle = True, random_state = 12)
+list_subset_sizes = list(np.arange(1,17))
+transformer = PowerTransformer()
+
+
+def get_feature_combinations(n_features, subset_size):
+    combinations = list(itertools.combinations(range(n_features), subset_size))
+    return [",".join(map(str, comb)) for comb in combinations]
+
+def objective(trial):
+    n_features = x_train.shape[1] - x_train.columns.str.contains('KG_').sum() + 1
+    feature_combinations = get_feature_combinations(n_features, subset_size)
+    if not feature_combinations:
+        return float("-inf")
+
+    selected_features_str = trial.suggest_categorical("selected_subset", feature_combinations)
+    selected_features = tuple(map(int, selected_features_str.split(",")))
+    x_train_subset = x_train.iloc[:, list(selected_features)]
+    if x_train_subset.columns.str.contains('KG_').sum() > 0: # Add rest of climatic info
+        df_addition = x_train.iloc[:, x_train.columns.str.contains('KG_')]
+        cols_to_use = df_addition.columns.difference(x_train_subset.columns)
+        x_train_subset = pd.merge(x_train_subset, df_addition[cols_to_use], left_index=True, right_index=True, how='outer')
+    if estimator_name == 'RF':
+        classifier_obj = RandomForestRegressor(n_jobs=-1, random_state = 12)
+    elif estimator_name == "KNN":
+        classifier_obj = KNeighborsRegressor(n_neighbors= 5, n_jobs=-1)
+    elif estimator_name == "GBM":
+        classifier_obj = HistGradientBoostingRegressor(random_state=12)
+    elif estimator_name == "GLM":
+        classifier_obj = Ridge()
+    elif estimator_name == "ANN":
+        classifier_obj = MLPRegressor(hidden_layer_sizes=[10], random_state=12, max_iter = 3500)
+
+    pipeline = Pipeline([
+        ('transformer', transformer),
+        ('scaler', MinMaxScaler((0, 1))),
+        ('regressor', classifier_obj) 
+        ])
+            
+    score = cross_validate(
+        pipeline, x_train_subset, y_train_impact, cv=cv, 
+        groups = groups_encoded,  scoring='neg_root_mean_squared_error',  
+        n_jobs=-1, return_train_score=False
+        )['test_score'].mean()
+    return score
+
+impact = 'IC'
+y_train_impact = y_train[impact].copy()
+
+for estimator_name in ['A']:
+    best_estimators[impact] = {estimator_name: {}}
+    for subset_size in list_subset_sizes:
+
+        search_space = {"selected_subset": get_feature_combinations(
+            x_train.shape[1] - x_train.columns.str.contains('KG_').sum() + 1,
+              subset_size
+              )}
+
+        if not search_space["selected_subset"]:
+            print(f"Skipping subset size {subset_size} (no valid combinations).")
+            continue
+
+        sampler = optuna.samplers.GridSampler(search_space)
+        study = optuna.create_study(direction="maximize", sampler=sampler)
+        study.optimize(objective, n_trials=1500, n_jobs=-1)
+        if len(study.trials) == 0 or study.best_trial.state != optuna.trial.TrialState.COMPLETE:
+            print(f"No completed trials for subset size {subset_size}. Skipping.")
+            continue
+
+        # Store best subset
+        best_subset = tuple(map(int, study.best_params["selected_subset"].split(",")))
+        best_estimators[impact][estimator_name][subset_size] = best_subset
+        print(f"Best subset for {estimator_name} at size {subset_size}: {best_subset}")
+
+with open('dict_predictor_importances_P_IC_A_wcat.pkl', 'wb') as f:
+    pickle.dump(best_estimators, f)
