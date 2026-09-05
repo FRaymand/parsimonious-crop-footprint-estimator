@@ -1,22 +1,37 @@
 '''
-This script:
-1) Creates a new brightway project, imports ecoinvent, imports ReCiPe methods
-2) Filters ecoinvent to get crop production activities & makes a dataframe of them
-3) Calculates footprints for H/E/I perspectives of ReCiPe
-4) Compiles technosphere input flows 
-5) Converts fertiliser inputs to active ingredients (NPK) & aggregates predictors
-6) Applies conversions between units & harmonizes unit spelling
-7) Extracts biosphere flows
-8) Concatenates biosphere/technosphere flows into the inputs dataframe
-9) Constructs the categorical dataframe for ecoinvent
+Processing Script: Importing crop production activities from ecoinvent
 
-N.B. Make sure you have the license for ecoinvent 3.11 to be able to reproduce 
-these results (relevant to Section 1)
+Input Specifications:
+    - ecoinvent database (with your own license)
+
+Output Specifications:
+    - Pickled dataframes of input LCI and footprints
+
+Script process:
+    1) Creates a new brightway project, imports ecoinvent, imports ReCiPe methods
+    2) Filters ecoinvent to get crop production activities & makes a dataframe of them
+    3) Calculates footprints for H/E/I perspectives of ReCiPe
+    4) Compiles technosphere input flows 
+    5) Converts fertiliser inputs to active ingredients (NPK) & aggregates predictors
+    6) Applies conversions between units & harmonizes unit spelling
+    7) Extracts biosphere flows
+    8) Concatenates biosphere/technosphere flows into the inputs dataframe
+    9) Constructs the categorical dataframe for ecoinvent
+
+    N.B. Make sure you have the license for ecoinvent 3.11 to be able to reproduce 
+    these results (relevant to Section 1)
+
+Prerequisite:
+    - None
+
+Prerequisite for:
+    - 4_preprocessing.py
 '''
 from typing import Iterable, List
 import pandas as pd
 from tqdm import tqdm
 import pickle
+import logging
 import re
 import brightway2 as bw
 import bw2data as bd
@@ -196,7 +211,7 @@ bd.projects.set_current('name')
 my_bio = bw.Database('ecoinvent biosphere - version')
 eidb = bw.Database('ecoinvent database - version')
 
-recipe2016_PDF_tot_noLT = ('ReCiPe 2016 v1.03, endpoint (H) no LT', 
+recipe2016_PDF_tot_noLT_H = ('ReCiPe 2016 v1.03, endpoint (H) no LT', 
  'total: ecosystem quality no LT',  #10 multiple under-indentations
  'ecosystem quality no LT')
 
@@ -208,7 +223,7 @@ recipe2016_PDF_tot_noLT_I = ('ReCiPe 2016 v1.03, endpoint (I) no LT',
  'total: ecosystem quality no LT',
  'ecosystem quality no LT')
 
-recipe2016_WU_noLT = ('ReCiPe 2016 v1.03, midpoint (H) no LT',
+recipe2016_WU_noLT_H = ('ReCiPe 2016 v1.03, midpoint (H) no LT',
  'water use no LT',
  'water consumption potential (WCP) no LT')
 
@@ -224,7 +239,7 @@ recipe2016_CC_noLT_I = ('ReCiPe 2016 v1.03, midpoint (I) no LT',
  'climate change no LT',
  'global warming potential (GWP20) no LT')
 
-recipe2016_CC_noLT = ('ReCiPe 2016 v1.03, midpoint (H) no LT',
+recipe2016_CC_noLT_H = ('ReCiPe 2016 v1.03, midpoint (H) no LT',
  'climate change no LT',
  'global warming potential (GWP100) no LT')
 
@@ -232,7 +247,7 @@ recipe2016_CC_noLT_E = ('ReCiPe 2016 v1.03, midpoint (E) no LT',
  'climate change no LT',
  'global warming potential (GWP1000) no LT')
 
-print('Section 1 completed')
+logging.info('Defined the project and LCIA methods.')
 
 # 2) Filter ecoinvent to get crop production activities & makes a dataframe of them
 commodities_agricultural = ['abaca', 'alfalfa', 'almond', 'apple', 'apricot',
@@ -291,6 +306,8 @@ irrelevant_list = ['forestry', 'manure', 'aluminium', 'cutting', 'market',
 land_flow_codes_auto = get_land_flow_codes(bd.databases)
 
 filtered_activities = filter_irrelevant(filter_animalHusbandry(filter_landOccupation(eidb)))
+
+# Remove activities aggregated over more than one country
 filtered_activities_with_location = [act for act in filtered_activities 
                                      if act['location'] not in ['GLO', 'RoW', 'RER', 'RNA']]
 
@@ -306,38 +323,25 @@ df_commodities[['country', 'database', 'unit', 'code', 'name']] = [[activity['lo
 
 with open('list_ei_only_3.11.pkl', 'wb') as f:
     pickle.dump(list_ei_only, f)
-print('Section 2 completed')
+logging.info('Filtered relevant activities.')
 
 # 3) Calculating footprints for H/I/E perspectives
-
-list_methods = [recipe2016_PDF_tot_noLT, recipe2016_WU_noLT, recipe2016_CC_noLT]
 list_functional_units = [{act.key:1} for act in list_ei_only]
-bw.calculation_setups['agros'] = {'inv':list_functional_units, 'ia':list_methods}
-agros_multi_lca = bw.MultiLCA('agros')
-df_impacts_H = df_commodities[['crop', 'country', 'code']]
-df_impacts_H[['PDF_noLT', 'WU_noLT', 'CC_noLT']] = agros_multi_lca.results
-with open('df_impacts_ecoinvent_3_11_H.pkl', 'wb') as g:
-    pickle.dump(df_impacts_H, g)
+list_perspectives = ['H', 'E', 'I']
+list_methods_H = [recipe2016_PDF_tot_noLT_H, recipe2016_WU_noLT_H, recipe2016_CC_noLT_H]
+list_methods_I = [recipe2016_PDF_tot_noLT_I, recipe2016_WU_noLT_I, recipe2016_CC_noLT_I]
+list_methods_E = [recipe2016_PDF_tot_noLT_E, recipe2016_WU_noLT_E, recipe2016_CC_noLT_E]
+dict_perspectives = {'H': list_methods_H, 'E': list_methods_E, 'I': list_methods_I}
 
-list_methods = [recipe2016_PDF_tot_noLT_I, recipe2016_WU_noLT_I, recipe2016_CC_noLT_I]
-list_functional_units = [{act.key:1} for act in list_ei_only]
-bw.calculation_setups['agros'] = {'inv':list_functional_units, 'ia':list_methods}
-agros_multi_lca = bw.MultiLCA('agros')
-df_impacts_I = df_commodities[['crop', 'country', 'code']]
-df_impacts_I[['PDF_noLT', 'WU_noLT', 'CC_noLT']] = agros_multi_lca.results
-with open('df_impacts_ecoinvent_3_11_I.pkl', 'wb') as g:
-    pickle.dump(df_impacts_I, g)
+for perspective in list_perspectives:
+    bw.calculation_setups['agros'] = {'inv':list_functional_units, 'ia':dict_perspectives[perspective]}
+    agros_multi_lca = bw.MultiLCA('agros')
+    df_impacts = df_commodities[['crop', 'country', 'code']]
+    df_impacts[['PDF_noLT', 'WU_noLT', 'CC_noLT']] = agros_multi_lca.results
+    with open(f'df_impacts_ecoinvent_3_11_{perspective}.pkl', 'wb') as g:
+        pickle.dump(df_impacts, g)
 
-list_methods = [recipe2016_PDF_tot_noLT_E, recipe2016_WU_noLT_E, recipe2016_CC_noLT_E]
-list_functional_units = [{act.key:1} for act in list_ei_only]
-bw.calculation_setups['agros'] = {'inv':list_functional_units, 'ia':list_methods}
-agros_multi_lca = bw.MultiLCA('agros')
-df_impacts_E = df_commodities[['crop', 'country', 'code']]
-df_impacts_E[['PDF_noLT', 'WU_noLT', 'CC_noLT']] = agros_multi_lca.results
-with open('df_impacts_ecoinvent_3_11_E.pkl', 'wb') as g:
-    pickle.dump(df_impacts_E, g)
-
-print('Section 3 completed')
+logging.info('Calculated footprints.')
 
 # 4) We discard those activities with stem/straw as main product as biproducts
 # For the remaining activities, if they don't have acceptable units, it goes
@@ -379,7 +383,7 @@ df_summed_filtered = df_summed.loc[~df_summed['new_input'].str.contains('|'.join
                         , 'for agricultural machinery']))]
 
 df_summed_filtered = df_summed_filtered.loc[df_summed_filtered['amount'] > 0]
-print('Section 4 completed')
+logging.info('Removed machinery inputs with bad units.')
 
 # 5) We convert various fertilisers to active ingredients (NPK)
 dict_npk = {'calcium ammonium nitrate (CAN) (with 27% N)':(0.27, 0, 0) ,
@@ -435,6 +439,7 @@ df_ei_fert = df_fert.groupby(['activity', 'code', 'location', 'unit', 'bucket'
                               , 'subbucket'], as_index = False).sum()
 
 df_non_fert = df_summed_filtered[~df_summed_filtered['new_input'].str.contains('|'.join(dict_npk.keys()))]
+logging.info('Converted fertiliser inputs to N/P/K active ingredients.')
 apply_buckets(df_non_fert)
 df_non_fert = df_non_fert.loc[~(df_non_fert['subbucket'].isin(['seed'
                         , 'seedling', 'inf/equipment', 'misc', 'harvest_activities']))]
@@ -443,7 +448,7 @@ df_ei = pd.concat([df_non_fert, df_ei_fert], axis = 0).sort_values(by = 'activit
 df_ei = df_ei.reset_index()
 df_ei['crop'] = df_ei['activity'].str.replace(' production', "")
 df_ei = df_ei.drop(columns = ['index', 'activity'])
-print('Section 5 completed')
+logging.info('Aggregated inputs into general predictors.')
 
 # 6) Apply conversions between units & harmonize unit spelling
 df_ei.loc[(df_ei['new_input'] == 'market for fatty acid'), ['bucket', 'subbucket']] = ['plant_protection', 'protection']
@@ -464,7 +469,7 @@ df_pivot = df_ei.pivot_table(columns = [ 'subbucket', 'unit']
                              , values = 'amount' , index = 'code'
                              , aggfunc = 'sum').sort_values(by = 'code').fillna (0)
 df_pivot.columns = [f"{subbucket}_{unit}" for subbucket, unit in df_pivot.columns]
-print('Section 6 completed')
+logging.info('Made units consistent.')
 
 # 7) Extract biosphere flows
 exchange_groups = [[exc for exc in activity.biosphere()] for activity in tqdm(list_ei_only)]
@@ -513,7 +518,7 @@ for activity in tqdm(df['activity'].unique()):
         yield_data.append({'activity': activity, 'yield': yield_value})
 
 yield_df = pd.DataFrame(yield_data)
-print('Section 7 completed')
+logging.info('Added yield information.')
 
 # 8) We concatenate biosphere/technosphere flows into the inputs dataframe
 df_ei_full = pd.merge(df_pivot , yield_df , left_index = True , right_on = 'activity' , how=  'inner')
@@ -522,10 +527,10 @@ df_ei_full = df_ei_full.set_index('activity')
 with open('df_ecoinvent_inputs_3.11.pkl', 'wb') as f:
     pickle.dump(df_ei_full, f)
 
-print('Section 8 completed')
+logging.info('Saved ecoinvent LCI and footprints to file.')
 
 # 9) Construct the categorical dataframe for ecoinvent
-df_categorical = df_impacts_H[['code', 'crop', 'country']]
+df_categorical = df_impacts[['code', 'crop', 'country']]
 df_categorical['country'] = [loca.split('-')[0] for loca in df_categorical['country']]
 df_categorical = df_categorical[df_categorical['code'].isin(df_pivot.index)]
 df_categorical.loc[df_categorical['crop'].isin(['lettuce360', 'lettuce361']), 'crop'] = 'lettuce'
@@ -534,7 +539,7 @@ df_categorical.loc[df_categorical['country'].isin(['Canada']), 'country'] = 'CA'
 
 with open('df_ecoinvent_categorical_3.11.pkl', 'wb') as f:
     pickle.dump(df_categorical, f)
-print('Section 9 completed')
+logging.info('Saved categortical information of activities found in ecoinvent.')
 
-len(df_impacts_H), len(df_ei_full), len(df_categorical)
-print('Script is Done')
+len(df_impacts), len(df_ei_full), len(df_categorical)
+logging.info('Script is Finished.')

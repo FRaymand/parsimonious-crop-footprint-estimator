@@ -1,41 +1,53 @@
 '''
-This script:
-1) imports all previously made dataframes of inputs, impacts and cateogircal info 
-2) Ensures the various dataframes correspond and filters irrelevant activities
-3) Manually fixes the names of various crop production activities
-4) Writes the finalized dataframes to be used in analysis
+Processing Script: Preprocessing model inputs
+
+Input Specifications:
+    - Pickled dataframes of input LCI and footprints from all databases
+
+Output Specifications:
+    - Pickled dataframes of input LCI and footprints after processing
+
+Script process:
+    1) imports all previously made dataframes of inputs, impacts and cateogircal info 
+    2) Ensures the various dataframes correspond and filters irrelevant activities
+    3) Manually fixes the names of various crop production activities
+    4) Writes the finalized dataframes to be used in analysis
+    5) Imports all previously made dataframes of inputs, impacts and cateogircal info
+    6) Adds information on crop type (annual/perennial) and climatic zone of activity and encodes it
+    7) Saves the resulting dataframes
+    8) Generates summary plots
+
+Prerequisite:
+    - 1_dataCompilation_ecoinvent.py
+    - 2_dataCompilation_wfldb.py
+    - 3_dataCompilation_agribalyse.py
+
+Prerequisite for:
+    - 5_model_predictorSelection.py
 '''
 
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
 import pickle
-import copy
+import logging
+from statsmodels.stats.outliers_influence import variance_inflation_factor
 np.random.seed(12)
 
-def merge_dicts_double(dict1, dict2):
-    merged = copy.deepcopy(dict1)
-    for key, value in dict2.items():
-        if key in merged:
-            if isinstance(value, dict) and isinstance(merged[key], dict):  
-                merged[key] = merge_dicts_double(merged[key], value)
-            else:
-                merged[key] = value
-        else:
-            merged[key] = value
-            
-    return merged
 
-def merge_all_dicts(dict_list):
-    if not dict_list:
-        return {}
-    merged_dict = dict_list[0]
-    for d in dict_list[1:]:
-        merged_dict = merge_dicts_double(merged_dict, d)
-    
-    return merged_dict
+def calculate_vif(df):
+    X = df
+    vif_data = pd.DataFrame()
+    vif_data["feature"] = X.columns 
+    vif_data["VIF"] = [variance_inflation_factor(X.values, i) for i in range(len(X.columns))]
+    return vif_data
 
 
-def process_perspective(perspective):
+perspectives = ['H', 'E', 'I']
+
+for perspective in perspectives:
+
     # 1) Load dataframes
     df_inputs_ei = pd.read_pickle('df_ecoinvent_inputs_3.11.pkl').rename(columns={'yield': 'yield_kg/ha'})
     df_categorical_ei = pd.read_pickle('df_ecoinvent_categorical_3.11.pkl')
@@ -53,7 +65,7 @@ def process_perspective(perspective):
     df_categorical_wf = pd.read_pickle('df_wfldb_categorical.pkl')
     df_impacts_wf = pd.read_pickle(f'df_wfldb_impacts_{perspective}.pkl').rename(
         columns={'Ecosystems': 'Biodiversity Loss', 'Water consumption': 'Water Use', 'Global warming': 'Climate Change', 'code': 'activity'})
-    print('Section 1 Done')
+    logging.info('Section 1 Done')
 
     # 2) Concatenate and clean
     df_categorical = pd.concat([df_categorical_ei, df_categorical_ag, df_categorical_wf])
@@ -72,11 +84,11 @@ def process_perspective(perspective):
     df_impacts = df_impacts.loc[common_indices]
     df_categorical = df_categorical.loc[common_indices]
     df_impacts = df_impacts.loc[df_impacts[(df_impacts > 0).all(axis=1)].index]
-    print('Section 2 Done')
+    logging.info('Section 2 Done')
 
     # 3) Manual crop renaming + Duplicate Removal
     df_categorical.loc[['codes for activitiesneeding manual renaming'], 'crop'] = 'crop to be renamed to' # ree=peat as necessary
- 
+
     df_categorical.loc[df_categorical['crop'].str.contains('|'.join(['triticale grain', 'Triticale grain'])), 'crop'] = 'triticale'
     df_categorical.loc[df_categorical['crop'].str.contains('|'.join(['Forage barley', 'forage barley'])), 'crop'] = 'barley'
     df_categorical.loc[df_categorical['crop'].str.contains('|'.join(['soybeans', 'soybeans'])), 'crop'] = 'soybean'
@@ -186,12 +198,12 @@ def process_perspective(perspective):
     df_categorical.loc[df_categorical['crop']== 'Pistachio, in shell', 'crop'] = 'pistachio'
     df_categorical.loc[df_categorical['crop']== 'Shea fruit, Sahel region', 'crop'] = 'shea fruit'
     df_categorical.loc[df_categorical['crop']== 'Tea, fresh leaves', 'crop'] = 'tea'
-    print('Section 3 Done')
+    logging.info('Section 3 Done')
 
     # 4) Deleting dupicated activities identified across the databases
     list_duplicates = ['DUPLICATE ACTIVITIES CODES'] # Agribalyse activities
     list_preprocessings = ['DUPLICATE ACTIVITIES CODES'] # WFLDB activities
-    
+
     df_categorical = df_categorical.loc[~df_categorical.index.isin(list_preprocessings + list_duplicates)]    
     df_categorical['crop'] = df_categorical['crop'].str.lower()
 
@@ -207,10 +219,152 @@ def process_perspective(perspective):
         pickle.dump(df_categorical, f)
     with open(f'df_impacts_{perspective}.pkl', 'wb') as f:
         pickle.dump(df_impacts, f)
-    print(f'Processing for perspective {perspective} done.')
+    logging.info(f'Processing for perspective {perspective} done.')
 
 
-if __name__ == "__main__":
-    for perspective in ['H', 'E', 'I']:
-        process_perspective(perspective)
-    print('All perspectives processed.')
+
+    # 5) Load dataframes for each perspective
+    df_categorical = pd.read_pickle(f'df_categorical_{perspectives}.pkl')
+    df_impacts = pd.read_pickle(f'df_impacts_{perspectives}.pkl')
+    df_inputs = pd.read_pickle(f'df_inputs_{perspectives}.pkl')
+
+    # 6) Add crop type and climate zone info
+    df_crops = pd.read_excel('crop_zone_classification.xlsx', sheet_name='crops')
+    df_zones = pd.read_excel('crop_zone_classification.xlsx', sheet_name='zones')
+
+    df_categorical = df_categorical.reset_index()
+
+    df_1 = pd.merge(df_categorical, df_crops, left_on='crop', right_on='Crop species')
+    df_2 = pd.merge(df_1, df_zones, left_on = 'country', right_on = 'country')
+    df_2 = df_2.set_index('activity')
+
+    df_inputs_new = pd.merge(df_inputs, 
+                             df_2, 
+                             left_index=True, 
+                             right_index = True).drop(columns = ['crop', 'country', 'Crop species', 
+                                                                 'IMAGE', 'climatic', 'continent', 
+                                                                 'crop group'])
+    df_inputs_new = pd.concat([df_inputs_new, pd.get_dummies(df_inputs_new[['KG']])], axis=1).drop(columns = ['KG'])
+    df_inputs_new = df_inputs_new.astype(float)
+    df_inputs = df_inputs_new
+    df_inputs = df_inputs.fillna(0)
+    y_train_whole = pd.DataFrame(np.log(df_impacts), columns=df_impacts.columns).fillna(0)
+
+    # 7) Save processed data
+    with open(f'x_{perspectives}_wcat.pkl', 'wb') as f:
+        pickle.dump(df_inputs, f)
+    with open(f'y_{perspectives}_wcat.pkl', 'wb') as f:
+        pickle.dump(y_train_whole, f)
+
+    # Save summary Excel
+    df_categorical.sort_values(by='crop').reset_index().set_index('crop')[['country', 'activity']]\
+        .rename(columns={'activity': 'number of activities'})\
+        .groupby(['crop', 'country']).count()\
+        .to_excel(f'S1_{perspectives}_aug.xlsx')
+
+    # 8) Plots
+    sns.set(font_scale=0.85)
+    plt.figure(figsize=(5, 20))
+    sns.barplot(x=df_categorical['crop'].value_counts().sort_index().values,
+                y=df_categorical['crop'].value_counts().sort_index().index)
+    plt.ylabel('Crop Species')
+    plt.xlabel('Number of production activities for crop')
+    plt.tight_layout()
+    plt.savefig(f'barplot_crop_counts_{perspectives}_wcat.png')
+    plt.close()
+
+    plt.figure(figsize=(5, 20))
+    sns.barplot(x=df_categorical['country'].value_counts().sort_index().values,
+                y=df_categorical['country'].value_counts().sort_index().index)
+    plt.ylabel('Country')
+    plt.xlabel('Number of production activities')
+    plt.tight_layout()
+    plt.savefig(f'barplot_country_counts_{perspectives}_wcat.png')
+    plt.close()
+
+    plt.figure(figsize=(10, 6))
+    sns.boxplot(data=df_impacts)
+    plt.title(f'Boxplot of Impacts - Perspective {perspectives}')
+    plt.tight_layout()
+    plt.savefig(f'boxplot_impacts_{perspectives}_wcat.png')
+    plt.close()
+
+    plt.figure(figsize=(10, 6))
+    sns.boxplot(data=y_train_whole)
+    plt.title(f'Boxplot of log Impacts - Perspective {perspectives}')
+    plt.tight_layout()
+    plt.savefig(f'boxplot_log_impacts_{perspectives}_wcat.png')
+    plt.close()
+
+    plt.figure(figsize=(7, 5))
+    sns.heatmap(df_inputs.corr(), vmin=-1, cmap='coolwarm')
+    plt.title(f'Pearson Correlation Coefficients - {perspectives}')
+    plt.tight_layout()
+    plt.savefig(f'heatmap_pearson_{perspectives}_wcat.png')
+    plt.close()
+
+    plt.figure(figsize=(7, 5))
+    sns.heatmap(df_inputs.corr(method='spearman'), vmin=-1, cmap='coolwarm')
+    plt.title(f'Spearman Ranks - {perspectives}')
+    plt.tight_layout()
+    plt.savefig(f'heatmap_spearman_{perspectives}_wcat.png')
+    plt.close()
+
+    # VIF calculation
+    vif_df = calculate_vif(df_inputs).sort_values(by='VIF', ascending=False).rename(columns={'VIF': f'VIF_{perspectives}'})
+    vif_df.to_excel(f'vif_{perspectives}_wcat.xlsx')
+
+    # Heatmaps for each impact
+    x_scaled = df_inputs.astype(float)
+    fig, axes = plt.subplots(nrows=1, ncols=len(df_impacts.columns), figsize=(35, 12))
+    annot_font_size = 15
+    for idx, impact in enumerate(df_impacts.columns):
+        df_pearson_feed = x_scaled.merge(
+            df_impacts[[impact]], right_index=True, 
+            left_index=True, how='inner'
+            ).copy()
+        sns.heatmap(
+            df_pearson_feed.corr(method='spearman')[[impact]].sort_values(by=impact, key=abs),
+            cmap='coolwarm', annot=True, vmin=-1, vmax=1, ax=axes[idx], 
+            annot_kws={"size": annot_font_size}
+            )
+        axes[idx].set_aspect(aspect='auto')
+        axes[idx].tick_params(axis='both', which='major', labelsize=16)
+    plt.tight_layout()
+    plt.savefig(f'heatmap_spearman_impacts_{perspectives}_wcat.png')
+    plt.close()
+
+    fig, axes = plt.subplots(
+        nrows=1, ncols=len(df_impacts.columns), 
+        figsize=(35, 12)
+        )
+    for idx, impact in enumerate(df_impacts.columns):
+        df_pearson_feed = x_scaled.merge(
+            df_impacts[[impact]], right_index=True, 
+            left_index=True, how='inner'
+            ).copy()
+        sns.heatmap(
+            df_pearson_feed.corr(method='pearson')[[impact]].sort_values(by=impact, key=abs),
+            cmap='coolwarm', annot=True, vmin=-1, vmax=1, 
+            ax=axes[idx], annot_kws={"size": annot_font_size}
+                    )
+        axes[idx].set_aspect(aspect='auto')
+        axes[idx].tick_params(axis='both', which='major', labelsize=16)
+    plt.tight_layout()
+    plt.savefig(f'heatmap_pearson_impacts_{perspectives}_wcat.png')
+    plt.close()
+
+    # Example scatterplot for yield vs first impact (customize as needed)
+    impact_name = df_impacts.columns[0]
+    df_pearson_feed = x_scaled.merge(
+        df_impacts[[impact_name]], right_index=True, 
+        left_index=True, how='inner'
+        ).copy()
+    plt.figure(figsize=(7, 7))
+    plt.xscale('log')
+    plt.yscale('log')
+    sns.scatterplot(data=df_pearson_feed, x='yield_kg/ha', y=impact_name)
+    plt.title(f'Scatterplot yield vs {impact_name} - {perspectives}')
+    plt.tight_layout()
+    plt.savefig(f'scatter_yield_vs_{impact_name}_{perspectives}_wcat.png')
+    plt.close()

@@ -1,13 +1,26 @@
 '''
-This script:
-1) imports all dataframes, results & functions
-2) Sets up calculations
-3) Calculates metrics (R2, RMSE) for both tuned and non-tuned models
-4) Finds the knee point for each impact
-5) Plots performance vs predictor counts
-6) Computes SHAP values
-7) Plots predictor contributions
-8) Saves SI-related material
+Processing Script: Produce model results
+
+Input Specifications:
+    - Dictionary of best hyperparameters for each combination of (impact, model, size)
+        - Type: Pandas Dataframe
+
+Script process:
+    1) imports all dataframes, results & functions
+    2) Sets up calculations
+    3) Calculates metrics (R2, RMSE) for both tuned and non-tuned models
+    4) Finds the knee point for each impact
+    5) Plots performance vs predictor counts
+    6) Computes SHAP values
+    7) Plots predictor contributions
+    8) Saves SI-related material
+
+Prerequisite:
+    - 5_model_predictorSelection.py
+    - 6_model_hyperparamTuning.py
+
+Prerequisite for:
+    - None
 '''
 
 import pandas as pd
@@ -25,41 +38,15 @@ from sklearn.preprocessing import MinMaxScaler, PowerTransformer
 from sklearn.preprocessing import OrdinalEncoder
 from sklearn.pipeline import Pipeline
 import os
-import copy
+import logging
 from sklearn.metrics import make_scorer, mean_squared_error
 from kneed import KneeLocator
 import shap
 import geopandas as gpd
 from matplotlib.lines import Line2D
 from IPython.display import display, HTML
+from aux_funcs import merge_dicts_double, merge_all_dicts
 np.random.seed(12)
-
-def merge_dicts_double(dict1, dict2):
-    '''    
-    Recursively merges two dictionaries. Values from dict2 overwrite dict1.
-    '''
-    merged = copy.deepcopy(dict1)  
-    for key, value in dict2.items():
-        if key in merged:  
-            if isinstance(value, dict) and isinstance(merged[key], dict):  
-                merged[key] = merge_dicts_double(merged[key], value)
-            else: 
-                merged[key] = value
-        else:  
-            merged[key] = value
-    return merged
-
-
-def merge_all_dicts(dict_list):
-    """
-    Merges a list of dictionaries using merge_dicts_double.
-    """
-    if not dict_list:  
-        return {}
-    merged_dict = dict_list[0]
-    for d in dict_list[1:]:
-        merged_dict = merge_dicts_double(merged_dict, d)
-    return merged_dict
 
 
 def extract_key_to_df(df, key):
@@ -75,30 +62,6 @@ def encode_groups(df, index):
     groups = df.loc[index][['crop']]
     enc = OrdinalEncoder()
     return enc.fit_transform(groups)
-
-
-def train_and_evaluate(
-        x_train, y_train, impact, estimator_name, 
-        subset_size, best_subset, cv, groups_encoded, scoring
-        ):
-    """
-    Trains and evaluates a model for a given impact, estimator, and subset size.
-    Returns mean R2 and RMSE.
-    """
-    n_features = x_train.shape[1]
-    feature_mask = [i in best_subset for i in range(n_features)]
-    x_train_subset = x_train.iloc[:, feature_mask].copy()
-    transformer = PowerTransformer()
-    pipeline = Pipeline([
-        ('transformer', transformer),
-        ('scaler', MinMaxScaler((0, 1))),
-        ('regressor', models[estimator_name])
-    ])
-    cv_results = cross_validate(
-        pipeline, x_train_subset, y_train[impact].copy(),
-        cv=cv, groups=groups_encoded, n_jobs=-1, scoring=scoring, return_train_score=False
-    )
-    return cv_results['test_r2'].mean(), cv_results['test_neg_root_mean_squared_error'].mean() , cv_results['test_rmse_original'].mean()
 
 
 def train_and_evaluate_wcat(
@@ -149,6 +112,7 @@ def train_and_evaluate_cat_only(
         cv=cv, groups=groups_encoded, n_jobs=-1, scoring=scoring, return_train_score=False
     )
     return cv_results['test_r2'].mean(), cv_results['test_neg_root_mean_squared_error'].mean() , cv_results['test_rmse_original'].mean()
+
 
 def train_and_evaluate_cat_yield(
         x_train, y_train, impact, estimator_name, 
@@ -227,17 +191,20 @@ def compute_global_shap_values(
 
     return global_shap_values
 
+
 def rmse_original(y_true, y_pred):
     # Inverse transform log values
     y_true_orig = np.exp(y_true)
     y_pred_orig = np.exp(y_pred)
     return np.sqrt(mean_squared_error(y_true_orig, y_pred_orig))
 
+
 def pretty_print(df):
     return display(HTML(df.to_html().replace("\\n","<br>")))
 
+
 rmse_original_scorer = make_scorer(rmse_original, greater_is_better=False)
-perspectives = [ 'P']
+perspectives = ['H', 'E', 'I']
 found_perspectives = []
 impact_order = [
     'Biodiversity Loss', 
@@ -256,19 +223,16 @@ for p in perspectives:
     if all(os.path.exists(f) for f in required_files):
         found_perspectives.append(p)
 
-print(f"Found perspectives: {', '.join(found_perspectives)}")
+logging.info(f"Found perspectives: {', '.join(found_perspectives)}")
 
 for p in found_perspectives:
-    print(f"\nProcessing perspective {p}...")
+    logging.info(f"Processing perspective {p}...")
 
     # 1) Import necessary dataframes built in previous scripts
     df_categorical = pd.read_pickle(f'df_categorical_{p}.pkl')
     df_impacts = pd.read_pickle(f'y_{p}_wcat.pkl')
     df_inputs = pd.read_pickle(f'x_{p}_wcat.pkl')
-
-    print('df_inputs: ', df_inputs.shape, '\n',
-        'df_impacts: ', df_impacts.shape, '\n', 
-        'df_categorical: ', df_categorical.shape)
+    logging.info(f'df_inputs: {df_inputs.shape} - df_impacts: {df_impacts.shape} - df_categorical: {df_categorical.shape}')
 
     # Import results and create dictionaries
     prefix_imp = (f"dict_predictor_importances_{p}_bl",
@@ -559,9 +523,9 @@ for p in found_perspectives:
         rmse_df = df_impact.map(lambda x: x['rmse'])
         max_model_per_row = rmse_df.idxmax(axis=1)
         best_model_at_knee = max_model_per_row[knee_idx]
-        print(f"{best_model_at_knee} gives the maximum RMSE at {knee_idx} predictors for {impact_name}")
+        logging.info(f"{best_model_at_knee} gives the maximum RMSE at {knee_idx} predictors for {impact_name}")
         best_models_knee[impact_name] = {best_model_at_knee: knee_idx}
-    print(best_models_knee)
+    logging.info(best_models_knee)
 
     # 5) Plotting performance vs predictor count
     sns.set(font_scale=1.55)

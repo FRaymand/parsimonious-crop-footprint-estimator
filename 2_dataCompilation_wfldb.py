@@ -1,15 +1,29 @@
 '''
-This script:
-1) Creates a new brightway project, imports WFLDB
-2) Filters WFLDB activities to get crop production LCIs
-3) Extracts technosphere/biosphere flows of crop production activities
-4) Converts units and harmonizes unit spellings
-5) Converts fertiliser inputs to active ingredients (NPK) & aggregates predictors
-6) Saves df_wfldb_inputs
-7) Constructs df_wfldb_categorical
-8) Constructs df_wfldb_impacts for all three perspectives
+Processing Script: Importing crop production activities from wfldb
 
-N.B. For WFLDB, yield is just the normalization factor
+Input Specifications:
+    - wfldb database (with your own license)
+
+Output Specifications:
+    - Pickled dataframes of input LCI and footprints
+
+Script process:
+    1) Creates a new brightway project, imports WFLDB
+    2) Filters WFLDB activities to get crop production LCIs
+    3) Extracts technosphere/biosphere flows of crop production activities
+    4) Converts units and harmonizes unit spellings
+    5) Converts fertiliser inputs to active ingredients (NPK) & aggregates predictors
+    6) Saves df_wfldb_inputs
+    7) Constructs df_wfldb_categorical
+    8) Constructs df_wfldb_impacts for all three perspectives
+
+    N.B. For WFLDB, yield is just the normalization factor
+
+Prerequisite:
+    - None
+
+Prerequisite for:
+    - 4_preprocessing.py
 '''
 
 import numpy as np
@@ -17,60 +31,10 @@ import pandas as pd
 from tqdm import tqdm
 import pickle
 import brightway2 as bw
+import logging
 import sympy
 import glob
-
-def find_value_for_keyword(df, keyword):
-    if df.loc[df['column1'] == keyword , 'column2'].values[0]:
-        value = df.loc[df['column1'] == keyword , 'column2'].values[0]
-    return value
-
-
-def find_products(df):
-    ''' used to find the name of product(s) and (their) units'''
-    i, j = (df[df['column1'].isin(['Products','Avoided products'])].index)
-    df = df.loc[i+1:j-1, ['column1', 'column3']].dropna(axis = 0, how = 'all')
-    return {'name' : df['column1'].values, 'unit' : df['column3'].values}    
-
-
-def find_normalization_value(df, name):
-    return df.loc[df.index[df['column1'] == 'Products'] + 1, 'column2'].iloc[0]
-
-
-def find_product_unit(df, name):
-    return df.loc[df.index[df['column1'] == 'Products'] + 1, 'column3'].iloc[0]
-
-
-def get_biosphere(df, normalization_factor, code, name, location):
-    i, j = (df[df['column1'].isin(['Resources','Materials/fuels'])].index)
-    df_bio = df.loc[i+1:j-1, ['column1', 'column2', 
-                              'column3', 'column4', 'column5',
-                              'column6','column7' ]].dropna(axis = 0, how = 'all')
-    df_bio.columns = ['new_input','medium',  'amount', 'unit',
-                       'distribution', 'sd', 'description']
-    df_bio['amount'] = [float(sympy.sympify(field)) if type(field) != float else field for field in df_bio['amount']]
-    df_bio['amount'] = df_bio['amount'] / normalization_factor
-    df_bio['code'] = code
-    df_bio['activity'] = name
-    df_bio['location'] = location
-    df_bio = df_bio.drop(columns = ['medium', 'distribution', 'sd'])
-    return df_bio
-
-
-def get_technosphere(df, normalization_factor, code, name, location):
-    i, j = (df[df['column1'].isin(['Materials/fuels', 'Emissions to air'])].index)
-    df_techno = df.loc[i+1:j-1,:]
-    df_techno.columns = ['new_input', 'amount', 
-                         'unit', 'description', 'description2', 
-                         'description3', 'description4']
-    df_techno = df_techno[['new_input', 'amount', 'unit', 'description']]
-    df_techno = df_techno.dropna(subset = ['unit']).dropna(axis = 0, how = 'all').dropna(axis = 1, how = 'all')
-    if len(df_techno) > 0:
-        df_techno.loc[:, 'amount'] = df_techno.loc[:, 'amount'] / normalization_factor
-        df_techno.loc[:, 'code'] = code
-        df_techno.loc[:, 'activity'] = name
-        df_techno.loc[:, 'location'] = location 
-    return df_techno
+from aux_funcs import find_value_for_keyword, find_products, find_normalization_value, find_product_unit, get_unique_exchanges, add_bucket, find_valid_inputs_ei, is_market_mix, convert_units
 
 
 def get_biosphere(df, normalization_factor, code, name, location):
@@ -97,90 +61,6 @@ def get_technosphere(df, normalization_factor, code, name, location):
         df_techno.loc[:, 'activity'] = name
         df_techno.loc[:, 'location'] = location 
     return df_techno
-
-
-def get_unique_exchanges(unit, df):
-    return print(*df[df['unit'] == unit]['exchange'].unique(), sep = '\n')
-
-
-def add_bucket(keyword, unit, subbucket, bucket, df):
-    '''keywords could be a list and it will still look for all of them'''
-    if type(keyword) != list:
-        keywords = [keyword, keyword.capitalize()]
-    else:
-        keywords = [word.capitalize() for word in keyword] + keyword
-    df.loc[(df['exchange'].str.contains('|'.join(keywords))) & (df['unit'] == unit), 'bucket'] = bucket
-    df.loc[(df['exchange'].str.contains('|'.join(keywords))) & (df['unit'] == unit), 'subbucket'] = subbucket
-
-
-def is_market_mix(activity):
-    """
-    Determines if an activity is a market mix by checking if:
-    - All technosphere inputs have the same name/unit.
-    - The inputs come from multiple regions.
-    - The activity name contains 'market for'.
-    """
-    technosphere_inputs = [
-        exc.input for exc in activity.exchanges() if exc["type"] == "technosphere"
-    ]
-    
-    if len(technosphere_inputs) < 2:
-        return False  # Not enough inputs to be a mix
-
-    # Check if all inputs share the same name and unit but differ in location
-    input_names = {inp["name"] for inp in technosphere_inputs}
-    input_units = {inp["unit"] for inp in technosphere_inputs}
-    input_locations = {inp.get("location", None) for inp in technosphere_inputs}
-
-    if len(input_names) == 1 and len(input_units) == 1 and len(input_locations) > 1:
-        return True  # Likely a market mix
-    
-    # Additional check: If name contains "market for", it is very likely a mix
-    if "market for" in activity["name"].lower():
-        return True
-
-    return False
-
-def find_valid_inputs_ei(activity, parent_amount = 1, visited=None):
-    """
-    Recursively finds technosphere inputs that are in kg or MJ.
-    If an input has another unit and is a market mix, it goes one level deeper.
-    """
-    if visited is None:
-        visited = set()
-    if activity["code"] in visited:  # Prevent infinite loops
-        return []
-    visited.add(activity["code"])
-
-    valid_inputs = []
-    
-    for exc in activity.exchanges():
-        if exc["type"] == "technosphere":
-            input_activity = exc.input
-            input_unit = input_activity["unit"]
-            adjusted_amount = exc.amount * parent_amount  # Multiply by parent amount
-            
-            if ('packaging' in (input_activity['name']).lower()) | (input_unit in {'m2', 'm2a'}):
-                continue  # Skip this iteration if 'packaging' is found
-
-            if (input_unit in ['cubic meter', 'm3']) & ('liquid manure spreading' in input_activity['name']):
-                valid_inputs.extend(find_valid_inputs_ei(input_activity,adjusted_amount,  visited))
-            elif (input_unit in {'litre', 'l'}) & ('drying' in input_activity['name']): # i want the electricity and/or heat inputs not the flow of drying (which is the removal of water)
-                valid_inputs.extend(find_valid_inputs_ei(input_activity,adjusted_amount,  visited))
-            elif input_unit in {'kilogram', "megajoule", "cubic meter", "kilowatt hour", "litre", 'kg', 'MJ', 'm3', 'kWh', 'kwh', 'l', 'lit', 'litre'}:
-                valid_inputs.append((exc, adjusted_amount))
-
-            elif (is_market_mix(input_activity)) & (input_unit not in {'kilogram', "megajoule", "cubic meter", "kilowatt hour", "litre", 'kg', 'MJ', 'm3', 'kWh', 'kwh', 'l', 'lit', 'litre'}):  
-                # Dive deeper if it's a market mix AND not kg/MJ
-                valid_inputs.extend(find_valid_inputs_ei(input_activity,adjusted_amount,  visited))
-            elif (input_unit in {'hectare', 'Ha', 'ha'}) & ('trellis system' not in input_activity['name']):
-                valid_inputs.extend(find_valid_inputs_ei(input_activity, adjusted_amount, visited))
-            elif input_unit == 'hour':
-                valid_inputs.extend(find_valid_inputs_ei(input_activity, adjusted_amount, visited))
-            elif (input_unit in {'ton kilometer', 'tkm'}) & ('transport, tractor and trailer, agricultural' in input_activity['name']):
-                valid_inputs.extend(find_valid_inputs_ei(input_activity, adjusted_amount, visited))
-
-    return valid_inputs
 
 
 def find_valid_inputs_wfldb(activity,activity_parent, parent_amount = 1, visited=None):
@@ -366,15 +246,6 @@ def apply_buckets(df):
     df.loc[(df['unit'] == 'kg/ha') & (df['new_input'].str.contains('yield', case=False)), ['bucket', 'subbucket']] = ['yield', 'yield']
 
 
-def convert_units(df, subbucket, prev_unit, desired_unit, coef):
-    '''Convert units based on flow names rather than subbucket or other criteria
-    Converts the amounts first before modifying the unit
-    '''
-    mask = (df['subbucket'] == subbucket) & (df['unit'] == prev_unit)
-    df.loc[mask, 'amount'] *= coef
-    df.loc[mask, 'unit'] = desired_unit
-    return df
-
 def convert_units_name_based(df, name, prev_subbucket, prev_unit, desired_unit, coef):
     '''Convert units based on flow names rather than subbucket or other criteria'''
 
@@ -388,11 +259,11 @@ bw.projects.set_current('name')
 my_bio = bw.Database('ecoinvent biosphere - version')
 eidb = bw.Database('ecoinvent database - version')
 
-df_wfldb = pd.read_excel('Path To WFLDB')
+df_wfldb = pd.read_excel('Path To excel version of WFLDB')
 df_wfldb.columns = ['column1', 'column2', 'column3', 
                     'column4', 'column5', 'column6', 'column7']
 df_wfldb = df_wfldb.reset_index().drop(columns = ['index'])
-print('Section 1 Done')
+logging.info('Defined the project and imported database.')
 
 # 2) We filter WFLDB to get crop production activities
 process_start_index = df_wfldb.index[df_wfldb['column1'] == 'Process'].tolist()
@@ -417,7 +288,7 @@ for i in tqdm(process_start_index[:-1]):
                     'sheep', 'Sheep', 'egg', 'Egg']):
         list_names_agri.append(name_product.split('/')[0])
         list_agri_processes.append(df_process)
-print('Section 2 Done')
+logging.info('Filtered crop production activities.')
 
 # 3) We extract biosphere and technosphere flows
 dict_acts = {}
@@ -444,13 +315,13 @@ for df_process in tqdm(list_agri_processes):
             data.append(df_bio.dropna(subset = 'amount')[df_bio.dropna(subset = 'amount')['new_input'].str.contains('Water')].groupby(['unit', 'code', 'activity', 'location']).sum().reset_index()[['new_input', 'amount', 'unit', 'code', 'activity', 'location']])
             dict_acts[name] = pd.concat(data)
     else:
-        print(name, ' has no biosphere')
+        raise Warning(f'{name} has no biosphere!')
 
 df = pd.concat(dict_acts).reset_index()[['new_input', 'amount','unit', 'code' ,'activity','location' ]]
 list_wfldb = list(dict_acts.keys())
 with open('list_wfldb.pkl', 'wb') as g:
     pickle.dump(list_wfldb, g)
-print('Section 3 Done')
+logging.info('Extracted biosphere/technosphere flows.')
 
 # 4) We convert units and harmonize unit spellings across databases
 df.loc[df['unit'] == 'g', 'amount'] = df.loc[df['unit'] == 'g', 'amount']/1000
@@ -472,39 +343,39 @@ df_summed_filtered_wfldb = df_summed_wfldb.loc[~df_summed_wfldb['new_input'].str
                                                                                                     'Soybean', 'Vanilla', 'Garlic', 'Ginger', 'Biomass burning', 'Dehydration', 
                                                                                                     'Biomass burning', 'Biowaste treatment']))]
 df_summed_filtered_wfldb = df_summed_filtered_wfldb.loc[df_summed_filtered_wfldb['amount'] > 0]
-print('Section 4 Done')
+logging.info('Harmonized unit spellings.')
 
 # 5) Convert fertiliser input to NPK (active ingredient)
 dict_npk = {'calcium ammonium nitrate (CAN) (with 27% N)':(0.27, 0, 0) ,
-'calcium ammonium nitrate production':(0.27, 0, 0) ,
-'market for calcium ammonium nitrate':(0.27, 0, 0) ,
-'market for calcium nitrate':(0.171, 0, 0) ,
-'calcium nitrate production':(0.171, 0, 0) ,
-'market for urea ammonium nitrate mix' :( 0.301, 0, 0), 
-'urea ammonium nitrate production' : (0.301, 0, 0) ,
-'Urea (with 46% N)' : (0.46, 0, 0),
-'market for urea': (0.466, 0, 0), 
-'market for ammonium sulfate': (0.212, 0, 0), 
-'ammonium sulfate production': (0.212, 0, 0),
-'Average mineral fertilizer, as N' : (1, 0, 0), 
-'market for ammonium nitrate':(0.35, 0, 0),
-'market for ammonia, anhydrous, liquid' : (0.822, 0, 0),
-'market for ammonium nitrate phosphate':(0.22, 0.22, 0),
-'market for NPK (15-15-15) fertiliser' : (0.15, 0.344, 0.181),
-'market for phosphate rock, beneficiated': (0, 0.32, 0),
-'market for monoammonium phosphate' : (0.084, 0.52, 0),
-'market for single superphosphate' : (0, 0.21, 0),
-'market for triple superphosphate' : (0, 0.46, 0),
-'market for diammonium phosphate' : (0.18, 0.46, 0),
-'nutrient supply from thomas meal' : (0, 1, 0),
-'market for potassium sulfate' : (0, 0, 0.541), 
-'market for potassium chloride' : (0, 0, 0.6),
-'market for potassium nitrate' : (0.139, 0, 0.466),
-'Ammonia (with 100% NH3)' : (0.822, 0, 0),
-'Ammonia (with 100% NH3), production mix': (0.822, 0, 0),
-'as K2O' : (0, 0, 1),
-'as N' : (1, 0, 0),
-'as P2O5' : (0,1,0)}
+            'calcium ammonium nitrate production':(0.27, 0, 0) ,
+            'market for calcium ammonium nitrate':(0.27, 0, 0) ,
+            'market for calcium nitrate':(0.171, 0, 0) ,
+            'calcium nitrate production':(0.171, 0, 0) ,
+            'market for urea ammonium nitrate mix' :( 0.301, 0, 0), 
+            'urea ammonium nitrate production' : (0.301, 0, 0) ,
+            'Urea (with 46% N)' : (0.46, 0, 0),
+            'market for urea': (0.466, 0, 0), 
+            'market for ammonium sulfate': (0.212, 0, 0), 
+            'ammonium sulfate production': (0.212, 0, 0),
+            'Average mineral fertilizer, as N' : (1, 0, 0), 
+            'market for ammonium nitrate':(0.35, 0, 0),
+            'market for ammonia, anhydrous, liquid' : (0.822, 0, 0),
+            'market for ammonium nitrate phosphate':(0.22, 0.22, 0),
+            'market for NPK (15-15-15) fertiliser' : (0.15, 0.344, 0.181),
+            'market for phosphate rock, beneficiated': (0, 0.32, 0),
+            'market for monoammonium phosphate' : (0.084, 0.52, 0),
+            'market for single superphosphate' : (0, 0.21, 0),
+            'market for triple superphosphate' : (0, 0.46, 0),
+            'market for diammonium phosphate' : (0.18, 0.46, 0),
+            'nutrient supply from thomas meal' : (0, 1, 0),
+            'market for potassium sulfate' : (0, 0, 0.541), 
+            'market for potassium chloride' : (0, 0, 0.6),
+            'market for potassium nitrate' : (0.139, 0, 0.466),
+            'Ammonia (with 100% NH3)' : (0.822, 0, 0),
+            'Ammonia (with 100% NH3), production mix': (0.822, 0, 0),
+            'as K2O' : (0, 0, 1),
+            'as N' : (1, 0, 0),
+            'as P2O5' : (0,1,0)}
 
 rows_final = []
 for name_npk in dict_npk.keys():
@@ -533,7 +404,7 @@ df_non_fert = df_non_fert[~df_non_fert['new_input'].str.contains('Ammonia (with 
 apply_buckets(df_non_fert)
 df_non_fert = df_non_fert.loc[~(df_non_fert['subbucket'].isin(['seed',
                                                                 'seedling', 'inf/equipment', 'misc', 'maintenance']))]
-print('Section 5 Done')
+logging.info('Converted fertiliser inputs to N/P/K active ingredients.')
 
 # 6) Save the inputs dataframe
 df_wf = pd.concat([df_non_fert, df_wf_fert], axis = 0).sort_values(by = 'activity')
@@ -555,8 +426,7 @@ df_wf_full.columns = [f"{subbucket}_{unit}" for subbucket, unit in df_wf_full.co
 
 with open('df_wfldb_inputs.pkl', 'wb') as f:
     pickle.dump(df_wf_full, f)
-print('Section 6 Done')
-
+logging.info('Made units consistent.')
 
 # 7) Make the categorical data dataframe
 df_wf_bucketized = df_wf.groupby([ 'code', 'activity', 'bucket','subbucket', 'unit', 'location']).agg('sum').reset_index()
@@ -573,112 +443,41 @@ with open('df_wfldb_categorical.pkl', 'wb') as f:
     pickle.dump(df_wf_categorical, f)
 with open('df_wfldb_categorical_complete.pkl', 'wb') as f:
     pickle.dump(df_wf_bucketized, f)
-print('Section 7 Done')
+logging.info('Saved categortical information of activities found in wfldb.')
 
 # 8) We make the impact dataframes for all three perspectives
-# 8.1) Egaletarian perspective
-files_list = glob.glob('path to exported impacts of crop production - E perspective')
-excels_list = [pd.read_excel(file) for file in files_list]
-list_impacts_midpoint, list_impacts_endpoint = [], []
+for perspective in ['H', 'E', 'I']:
 
-for file in files_list:
-    if 'mid' in file:
-        a = pd.read_excel(file).dropna(how = 'all', axis = 1).T
-        a = a.set_axis(a.iloc[0], axis=1)[2:]
-        a = a.rename(columns = {'Damage category' : 'impact', 'Impact category' : 'impact'})
-        a = a[['impact', 'Water consumption', 'Global warming']].set_index('impact')
-        list_impacts_midpoint.append(a)
+    files_list = glob.glob(f'path to exported impacts of crop production - {perspective}')
+    excels_list = [pd.read_excel(file) for file in files_list]
+    list_impacts_midpoint, list_impacts_endpoint = [], []
 
-    if 'end' in file:
-        a = pd.read_excel(file).dropna(how = 'all', axis = 1).T
-        a = a.set_axis(a.iloc[0], axis=1)[2:]
-        a = a.rename(columns = {'Damage category' : 'impact', 'Impact category' : 'impact'})
-        a = a[['impact', 'Ecosystems']].set_index('impact')
-        list_impacts_endpoint.append(a)
+    for file in files_list:
+        if 'mid' in file:
+            a = pd.read_excel(file).dropna(how = 'all', axis = 1).T
+            a = a.set_axis(a.iloc[0], axis=1)[2:]
+            a = a.rename(columns = {'Damage category' : 'impact', 'Impact category' : 'impact'})
+            a = a[['impact', 'Water consumption', 'Global warming']].set_index('impact')
+            list_impacts_midpoint.append(a)
 
-df_impacts_mid_wf = pd.concat(list_impacts_midpoint, axis = 0)
-df_impacts_end_wf = pd.concat(list_impacts_endpoint, axis = 0)
-df_impacts_end_wf = df_impacts_end_wf[df_impacts_end_wf.index.isin(df_wf['activity'])]
-df_impacts_mid_wf = df_impacts_mid_wf[df_impacts_mid_wf.index.isin(df_wf['activity'])]
+        if 'end' in file:
+            a = pd.read_excel(file).dropna(how = 'all', axis = 1).T
+            a = a.set_axis(a.iloc[0], axis=1)[2:]        
+            a = a.rename(columns = {'Damage category' : 'impact', 'Impact category' : 'impact'})
+            a = a[['impact', 'Ecosystems']].set_index('impact')
+            list_impacts_endpoint.append(a)
 
-df_impacts_end_wf = df_impacts_end_wf.drop_duplicates()
-df_impacts_mid_wf = df_impacts_mid_wf.drop_duplicates()
+    df_impacts_mid_wf = pd.concat(list_impacts_midpoint, axis = 0)
+    df_impacts_end_wf = pd.concat(list_impacts_endpoint, axis = 0)
+    df_impacts_end_wf = df_impacts_end_wf[df_impacts_end_wf.index.isin(df_wf['activity'])]
+    df_impacts_mid_wf = df_impacts_mid_wf[df_impacts_mid_wf.index.isin(df_wf['activity'])]
+    df_impacts_end_wf = df_impacts_end_wf.drop_duplicates()
+    df_impacts_mid_wf = df_impacts_mid_wf.drop_duplicates()
 
-df_impacts_wf = pd.concat([df_impacts_mid_wf, df_impacts_end_wf], axis = 1)
-df_impacts_wf = pd.merge(df_wf, df_impacts_wf, left_on = 'activity', right_index = True, how = 'inner').set_index('code')[['Water consumption', 'Global warming', 'Ecosystems']].drop_duplicates()
-with open('df_wfldb_impacts_E.pkl', 'wb') as f:
-    pickle.dump(df_impacts_wf, f)
-print('Section 8.1 Done')
+    df_impacts_wf = pd.concat([df_impacts_mid_wf, df_impacts_end_wf], axis = 1)
+    df_impacts_wf = pd.merge(df_wf, df_impacts_wf, left_on = 'activity', right_index = True, how = 'inner').set_index('code')[['Water consumption', 'Global warming', 'Ecosystems']].drop_duplicates()
 
+    with open(f'df_wfldb_impacts_{perspective}.pkl', 'wb') as f:
+        pickle.dump(df_impacts_wf, f)
 
-# 8.2) Individualist perspective
-files_list = glob.glob('path to exported impacts of crop production - I perspective')
-excels_list = [pd.read_excel(file) for file in files_list]
-list_impacts_midpoint, list_impacts_endpoint = [], []
-
-for file in files_list:
-    if 'mid' in file:
-        a = pd.read_excel(file).dropna(how = 'all', axis = 1).T
-        a = a.set_axis(a.iloc[0], axis=1)[2:]
-        a = a.rename(columns = {'Damage category' : 'impact', 'Impact category' : 'impact'})
-        a = a[['impact', 'Water consumption', 'Global warming']].set_index('impact')
-        list_impacts_midpoint.append(a)
-
-    if 'end' in file:
-        a = pd.read_excel(file).dropna(how = 'all', axis = 1).T
-        a = a.set_axis(a.iloc[0], axis=1)[2:]        
-        a = a.rename(columns = {'Damage category' : 'impact', 'Impact category' : 'impact'})
-        a = a[['impact', 'Ecosystems']].set_index('impact')
-        list_impacts_endpoint.append(a)
-
-df_impacts_mid_wf = pd.concat(list_impacts_midpoint, axis = 0)
-df_impacts_end_wf = pd.concat(list_impacts_endpoint, axis = 0)
-df_impacts_end_wf = df_impacts_end_wf[df_impacts_end_wf.index.isin(df_wf['activity'])]
-df_impacts_mid_wf = df_impacts_mid_wf[df_impacts_mid_wf.index.isin(df_wf['activity'])]
-
-df_impacts_end_wf = df_impacts_end_wf.drop_duplicates()
-df_impacts_mid_wf = df_impacts_mid_wf.drop_duplicates()
-
-df_impacts_wf = pd.concat([df_impacts_mid_wf, df_impacts_end_wf], axis = 1)
-df_impacts_wf = pd.merge(df_wf, df_impacts_wf, left_on = 'activity', right_index = True, how = 'inner').set_index('code')[['Water consumption', 'Global warming', 'Ecosystems']].drop_duplicates()
-
-with open('df_wfldb_impacts_I.pkl', 'wb') as f:
-    pickle.dump(df_impacts_wf, f)
-print('Section 8.2 Done')
-
-
-# 8.3) Hierarchist perspective
-files_list = glob.glob('path to exported impacts of crop production - H perspective')
-excels_list = [pd.read_excel(file) for file in files_list]
-list_impacts_midpoint, list_impacts_endpoint = [], []
-
-for file in files_list:
-    if 'mid' in file:
-        a = pd.read_excel(file).dropna(how = 'all', axis = 1).T
-        a = a.set_axis(a.iloc[0], axis=1)[2:]
-        a = a.rename(columns = {'Damage category' : 'impact', 'Impact category' : 'impact'})
-        a = a[['impact', 'Water consumption', 'Global warming']].set_index('impact')
-        list_impacts_midpoint.append(a)
-
-    if 'end' in file:
-        a = pd.read_excel(file).dropna(how = 'all', axis = 1).T
-        a = a.set_axis(a.iloc[0], axis=1)[2:]        
-        a = a.rename(columns = {'Damage category' : 'impact', 'Impact category' : 'impact'})
-        a = a[['impact', 'Ecosystems']].set_index('impact')
-        list_impacts_endpoint.append(a)
-
-df_impacts_mid_wf = pd.concat(list_impacts_midpoint, axis = 0)
-df_impacts_end_wf = pd.concat(list_impacts_endpoint, axis = 0)
-df_impacts_end_wf = df_impacts_end_wf[df_impacts_end_wf.index.isin(df_wf['activity'])]
-df_impacts_mid_wf = df_impacts_mid_wf[df_impacts_mid_wf.index.isin(df_wf['activity'])]
-
-df_impacts_end_wf = df_impacts_end_wf.drop_duplicates()
-df_impacts_mid_wf = df_impacts_mid_wf.drop_duplicates()
-
-df_impacts_wf = pd.concat([df_impacts_mid_wf, df_impacts_end_wf], axis = 1)
-df_impacts_wf = pd.merge(df_wf, df_impacts_wf, left_on = 'activity', right_index = True, how = 'inner').set_index('code')[['Water consumption', 'Global warming', 'Ecosystems']].drop_duplicates()
-
-with open('df_wfldb_impacts_H.pkl', 'wb') as f:
-    pickle.dump(df_impacts_wf, f)
-
-print('Script Done')
+logging.info('Script finished.')
