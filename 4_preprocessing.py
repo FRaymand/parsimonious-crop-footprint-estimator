@@ -93,7 +93,7 @@ for perspective in perspectives:
     df_categorical.loc[df_categorical['crop'].str.contains('|'.join(['Forage barley', 'forage barley'])), 'crop'] = 'barley'
     df_categorical.loc[df_categorical['crop'].str.contains('|'.join(['soybeans', 'soybeans'])), 'crop'] = 'soybean'
     df_categorical.loc[df_categorical['crop'].str.contains('|'.join(['Fodder', 'fodder'])), 'crop'] = 'fodder beet'
-    df_categorical.loc[df_categorical['crop'].str.contains('|'.join(['Field bean', 'field bean', 'field'])), 'crop'] = 'faba bean'
+    df_categorical.loc[df_categorical['crop'].str.contains('|'.join(['Field bean', 'field bean'])), 'crop'] = 'faba bean'
     df_categorical.loc[df_categorical['crop'].str.contains('|'.join(['Cocoa', 'cocoa'])), 'crop'] = 'cocoa'
     df_categorical.loc[df_categorical['crop'].str.contains('|'.join(['Tomato', 'tomato'])), 'crop'] = 'tomato'
     df_categorical.loc[df_categorical['crop'].str.contains('|'.join(['Almond', 'almond'])), 'crop'] = 'almond'
